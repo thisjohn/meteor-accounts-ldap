@@ -8,6 +8,7 @@ Package.describe({
 Npm.depends({
     'activedirectory': '0.7.2',
     'winston': '2.3.1',
+    'lodash': '4.17.4',
 });
 
 Package.onUse(function (api) {

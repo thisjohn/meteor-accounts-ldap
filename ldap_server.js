@@ -1,6 +1,15 @@
 'use strict';
 
-if (!Meteor.settings.ldap) {
+const _ = Npm.require('lodash');
+
+const defaultLdapSettings = {
+    userOption: {
+        mappings: []
+    }
+};
+const ldapSettings = _.merge({}, defaultLdapSettings,  Meteor.settings.ldap || {});
+const ldapUserOption = ldapSettings.userOption;
+if (!ldapSettings.enabled) {
     return;
 }
 
@@ -9,22 +18,40 @@ const Future = Npm.require('fibers/future');
 const winston = Npm.require('winston');
 
 // Logger
-var logger = new (winston.Logger)({
+const logger = new (winston.Logger)({
     level: 'debug',
 });
-if (Meteor.settings.ldap.debug) {
+if (ldapSettings.debug) {
     logger.add(winston.transports.Console);
 }
 
+//
+function getUniqueMapping() {
+    const target = _.find(ldapUserOption.mappings, function (it) {
+        return it.unique;
+    });
+    return target || {attr: 'uid', key: 'uid', unique: true};
+}
+
+function transformUserDoc(userEntry) {
+    const doc = {};
+    _.forEach(ldapUserOption.mappings, function (it) {
+        const value = _.get(userEntry, it.attr);
+        _.set(doc, it.key, value);
+    });
+    return doc;
+}
+
+//
 class UserQuery {
 
     constructor(username) {
         this.ad = ActiveDirectory({
-            url: Meteor.settings.ldap.url,
-            baseDN: Meteor.settings.ldap.baseDn,
-            username: Meteor.settings.ldap.bindCn,
-            password: Meteor.settings.ldap.bindPassword,
-            tlsOptions: Meteor.settings.ldap.tlsOptions || {}
+            url: ldapSettings.url,
+            baseDN: ldapSettings.baseDn,
+            username: ldapSettings.bindCn,
+            password: ldapSettings.bindPassword,
+            tlsOptions: ldapSettings.tlsOptions || {}
         });
         this.username = this.sanitizeForSearch(username);
     }
@@ -44,9 +71,10 @@ class UserQuery {
 
         const userFuture = new Future();
 
+        const mapping = getUniqueMapping();
         const opts = {
-            dn: Meteor.settings.ldap.usersDn || Meteor.settings.ldap.baseDn,
-            filter: `uid=${this.username}`
+            dn: ldapUserOption.dn || ldapSettings.baseDn,
+            filter: `${mapping.attr}=${this.username}`
         };
 
         this.ad.findUser(opts, '', function(err, userEntry) {
@@ -62,7 +90,7 @@ class UserQuery {
             }
 
             if (userEntry) {
-                logger.debug(JSON.stringify(userEntry));
+                logger.debug('Found', JSON.stringify(userEntry));
                 userFuture.return(userEntry);
                 return;
             }
@@ -73,11 +101,7 @@ class UserQuery {
             }
         }.bind(this));
 
-        const userEntry = userFuture.wait();
-        if (!userEntry) {
-            throw new (Meteor.Error)(403, 'User not found'); 
-        }
-        return this.userEntry = userEntry;
+        return this.userEntry = userFuture.wait();
     }
 
     authenticate(password) {
@@ -93,55 +117,67 @@ class UserQuery {
             }
 
             if (auth) {
-                logger.debug('Authenticated!');
+                logger.debug('Authenticated');
                 authenticateFuture.return(true);
             }
             else {
-                logger.warn('Authentication failed!');
+                logger.warn('Authentication failed');
                 authenticateFuture.return(false); 
             }
         }.bind(this));
 
-        const success = authenticateFuture.wait(); 
-        if (!success || (password === '')) {
-            throw new (Meteor.Error)(403, 'Invalid credentials');
-        }
-        return this.authenticated = success;
+        return this.authenticated = authenticateFuture.wait();
+    }
+
+    isValid() {
+        return !!this.userEntry && this.authenticated;
     }
 }
 
 // Register login handler
 Accounts.registerLoginHandler('ldap', function(request) {
     if (!request.ldap) { return undefined; }
+    logger.debug("Start to login with LDAP");
 
-    // 1. find user
+    // Find user from LDAP
     const userQuery = new UserQuery(request.username);
     const userEntry = userQuery.findUser();
+    if (!userEntry) {
+        throw new (Meteor.Error)(403, 'User not found');
+    }
 
-    // 2. authenticate user
-    userQuery.authenticate(request.pass);
+    // Authenticate user
+    const authenticated = userQuery.authenticate(request.pass);
+    if (!authenticated || (request.pass === '')) {
+        throw new (Meteor.Error)(403, 'Invalid credentials');
+    }
 
-    // 3. update database
-    let userId = undefined;
-    const user = Meteor.users.findOne({dn: userEntry.dn});
+    // Update/Insert Meteor user
+    const mapping = getUniqueMapping();
+    const value = _.get(userEntry, mapping.attr);
+    if (!value) {
+        throw new (Meteor.Error)(403, 'Missing matched unique mapping');
+    }
+
+    let user = Meteor.users.findOne({[mapping.key]: value});
     if (user) {
-        userId = user._id;
-        //Meteor.users.update(userId, {$set: userEntry});
+        logger.debug('Updated user', JSON.stringify(user));
     }
     else {
-        //userId = Meteor.users.insert(userEntry);
-        throw new (Meteor.Error)(403, 'Meteor user not found');
+        user = transformUserDoc(userEntry);
+        user._id = Accounts.createUser(user);
+        Accounts.setPassword(user._id, user.email);
+
+        logger.debug('Created user', JSON.stringify(user));
     }
 
-    /*
     const stampedToken = Accounts._generateStampedLoginToken();
     const hashStampedToken = Accounts._hashStampedToken(stampedToken);
-    Meteor.users.update(userId, {$push: {'services.resume.loginTokens': hashStampedToken}});
-    */
+    Meteor.users.update(user._id, {$push: {'services.resume.loginTokens': hashStampedToken}});
 
     return {
-        userId,
-        //token: stampedToken.token,
-        //tokenExpires: Accounts._tokenExpiration(hashStampedToken.when)
+        userId: user._id,
+        token: stampedToken.token,
+        tokenExpires: Accounts._tokenExpiration(hashStampedToken.when)
     };
 });
