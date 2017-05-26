@@ -1,4 +1,5 @@
 Meteor.loginWithLdap = function (username, password, callback) {
+    callback = callback || function () {};
     const requestArguments = {
         username: username,
         pass: password,  // Use pass instead password to prevent matching accounts-password
@@ -8,8 +9,6 @@ Meteor.loginWithLdap = function (username, password, callback) {
     // This will hook into our login handler for ldap
 	Accounts.callLoginMethod({
         methodArguments: [requestArguments],
-        userCallback: function (error, result) {
-            callback && callback(error, result);
-        }
+        userCallback: callback
     });
 };

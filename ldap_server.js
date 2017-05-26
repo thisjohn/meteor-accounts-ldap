@@ -26,7 +26,7 @@ if (ldapSettings.debug) {
 }
 
 //
-function getUniqueMapping() {
+function findUniqueMapping() {
     const target = _.find(ldapUserOption.mappings, function (it) {
         return it.unique;
     });
@@ -35,8 +35,15 @@ function getUniqueMapping() {
 
 function transformUserDoc(userEntry) {
     const doc = {};
+
+    // TODO: default settings
+    const site = Meteor.settings.public.site;
+    if (!!site) {
+        _.assign(doc, {profile: {teams: [site], site}});
+    }
+
     _.forEach(ldapUserOption.mappings, function (it) {
-        const value = _.get(userEntry, it.attr);
+        const value = !!it.attr ? _.get(userEntry, it.attr) : "";
         _.set(doc, it.key, value);
     });
     return doc;
@@ -71,7 +78,7 @@ class UserQuery {
 
         const userFuture = new Future();
 
-        const mapping = getUniqueMapping();
+        const mapping = findUniqueMapping();
         const opts = {
             dn: ldapUserOption.dn || ldapSettings.baseDn,
             filter: `${mapping.attr}=${this.username}`
@@ -153,7 +160,7 @@ Accounts.registerLoginHandler('ldap', function(request) {
     }
 
     // Update/Insert Meteor user
-    const mapping = getUniqueMapping();
+    const mapping = findUniqueMapping();
     const value = _.get(userEntry, mapping.attr);
     if (!value) {
         throw new (Meteor.Error)(403, 'Missing matched unique mapping');
@@ -166,18 +173,12 @@ Accounts.registerLoginHandler('ldap', function(request) {
     else {
         user = transformUserDoc(userEntry);
         user._id = Accounts.createUser(user);
-        Accounts.setPassword(user._id, user.email);
+        Accounts.setPassword(user._id, request.pass);
 
         logger.debug('Created user', JSON.stringify(user));
     }
 
-    const stampedToken = Accounts._generateStampedLoginToken();
-    const hashStampedToken = Accounts._hashStampedToken(stampedToken);
-    Meteor.users.update(user._id, {$push: {'services.resume.loginTokens': hashStampedToken}});
-
     return {
-        userId: user._id,
-        token: stampedToken.token,
-        tokenExpires: Accounts._tokenExpiration(hashStampedToken.when)
+        userId: user._id
     };
 });
