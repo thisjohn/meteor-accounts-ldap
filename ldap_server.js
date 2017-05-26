@@ -1,69 +1,80 @@
 'use strict';
 
 const _ = Npm.require('lodash');
-
-const defaultLdapSettings = {
-    userOption: {
-        mappings: []
-    }
-};
-const ldapSettings = _.merge({}, defaultLdapSettings,  Meteor.settings.ldap || {});
-const ldapUserOption = ldapSettings.userOption;
-if (!ldapSettings.enabled) {
-    return;
-}
-
 const ActiveDirectory = Npm.require('activedirectory');
 const Future = Npm.require('fibers/future');
 const winston = Npm.require('winston');
 
-// Logger
+/**
+ * Logger
+ */
 const logger = new (winston.Logger)({
     level: 'debug',
 });
-if (ldapSettings.debug) {
+if (Meteor.settings.ldap.debug) {
     logger.add(winston.transports.Console);
 }
 
-//
-function findUniqueMapping() {
-    const target = _.find(ldapUserOption.mappings, function (it) {
-        return it.unique;
-    });
-    return target || {attr: 'uid', key: 'uid', unique: true};
-}
+/**
+ * Manage LDAP settings
+ */
+class LdapConfigLoader {
 
-function transformUserDoc(userEntry) {
-    const doc = {};
+    constructor() {
+        const defaultSettings = {
+            userOption: {
+                mappings: []
+            }
+        };
 
-    // TODO: default settings
-    const site = Meteor.settings.public.site;
-    if (!!site) {
-        _.assign(doc, {profile: {teams: [site], site}});
+        this.settings = _.defaultsDeep(Meteor.settings.ldap || {}, defaultSettings);
+        this.userOption = this.settings.userOption;
+
+        // TODO: Default user doc
+        const site = Meteor.settings.public.site;
+        this.defaultUserDoc = {
+            profile: {
+                teams: [site],
+                site
+            }
+        };
     }
 
-    _.forEach(ldapUserOption.mappings, function (it) {
-        const value = !!it.attr ? _.get(userEntry, it.attr) : "";
-        _.set(doc, it.key, value);
-    });
-    return doc;
-}
-
-//
-class UserQuery {
-
-    constructor(username) {
-        this.ad = ActiveDirectory({
-            url: ldapSettings.url,
-            baseDN: ldapSettings.baseDn,
-            username: ldapSettings.bindCn,
-            password: ldapSettings.bindPassword,
-            tlsOptions: ldapSettings.tlsOptions || {}
+    findUniqueMapping() {
+        const target = _.find(this.userOption.mappings, function (it) {
+            return it.unique;
         });
-        this.username = this.sanitizeForSearch(username);
+        return target || {attr: 'uid', key: 'uid', unique: true};
     }
 
-    sanitizeForSearch(s) {
+    transformUserDoc(userEntry) {
+        const doc = _.cloneDeep(this.defaultUserDoc);
+
+        _.forEach(this.userOption.mappings, function (it) {
+            const value = !!it.attr ? _.get(userEntry, it.attr) : "";
+            _.set(doc, it.key, value);
+        });
+        return doc;
+    }
+}
+const ldapConfigLoader = new LdapConfigLoader();
+
+/**
+ * Find and authenticate user through LDAP
+ */
+class LdapAgent {
+
+    constructor() {
+        this.ad = ActiveDirectory({
+            url: ldapConfigLoader.settings.url,
+            baseDN: ldapConfigLoader.settings.baseDn,
+            username: ldapConfigLoader.settings.bindCn,
+            password: ldapConfigLoader.settings.bindPassword,
+            tlsOptions: ldapConfigLoader.settings.tlsOptions || {}
+        });
+    }
+
+    static sanitizeForSearch(s) {
         // Escape search string for LDAP according to RFC4515
         s = s.replace('\\', '\\5C');
         s = s.replace('\0', '\\00');
@@ -73,15 +84,16 @@ class UserQuery {
         return s;
     }
 
-    findUser() {
-        logger.debug('Find user "%s"', this.username);
+    findUser(username) {
+        username = LdapAgent.sanitizeForSearch(username);
+        logger.debug('Find user "%s"', username);
 
         const userFuture = new Future();
 
-        const mapping = findUniqueMapping();
+        const mapping = ldapConfigLoader.findUniqueMapping();
         const opts = {
-            dn: ldapUserOption.dn || ldapSettings.baseDn,
-            filter: `${mapping.attr}=${this.username}`
+            dn: ldapConfigLoader.userOption.dn || ldapConfigLoader.settings.baseDn,
+            filter: `${mapping.attr}=${username}`
         };
 
         this.ad.findUser(opts, '', function(err, userEntry) {
@@ -102,21 +114,21 @@ class UserQuery {
                 return;
             }
             else {
-                logger.warn('User "%s" not found', this.username);
+                logger.warn('User "%s" not found', username);
                 userFuture.return(false);
                 return;
             }
         }.bind(this));
 
-        return this.userEntry = userFuture.wait();
+        return userFuture.wait();
     }
 
-    authenticate(password) {
-        logger.debug('Authenticate "%s"', this.userEntry.dn);
+    authenticate(userDn, password) {
+        logger.debug('Authenticate "%s"', userDn);
 
         const authenticateFuture = new Future();
 
-        this.ad.authenticate(this.userEntry.dn, password, function(err, auth) {
+        this.ad.authenticate(userDn, password, function(err, auth) {
             if (err) {
                 logger.error('ad.authenticate error', JSON.stringify(err));
                 authenticateFuture.return(false);
@@ -133,37 +145,35 @@ class UserQuery {
             }
         }.bind(this));
 
-        return this.authenticated = authenticateFuture.wait();
-    }
-
-    isValid() {
-        return !!this.userEntry && this.authenticated;
+        return authenticateFuture.wait();
     }
 }
 
-// Register login handler
+/**
+ * Main LDAP login handler
+ */
 Accounts.registerLoginHandler('ldap', function(request) {
     if (!request.ldap) { return undefined; }
-    logger.debug("Start to login with LDAP");
+    logger.info("Login with LDAP");
 
     // Find user from LDAP
-    const userQuery = new UserQuery(request.username);
-    const userEntry = userQuery.findUser();
+    const ldapAgent = new LdapAgent();
+    const userEntry = ldapAgent.findUser(request.username);
     if (!userEntry) {
-        throw new (Meteor.Error)(403, 'User not found');
+        throw new Meteor.Error(403, 'User not found');
     }
 
     // Authenticate user
-    const authenticated = userQuery.authenticate(request.pass);
+    const authenticated = ldapAgent.authenticate(userEntry.dn, request.pass);
     if (!authenticated || (request.pass === '')) {
-        throw new (Meteor.Error)(403, 'Invalid credentials');
+        throw new Meteor.Error(403, 'Invalid credentials');
     }
 
     // Update/Insert Meteor user
-    const mapping = findUniqueMapping();
+    const mapping = ldapConfigLoader.findUniqueMapping();
     const value = _.get(userEntry, mapping.attr);
     if (!value) {
-        throw new (Meteor.Error)(403, 'Missing matched unique mapping');
+        throw new Meteor.Error(403, 'Missing matched unique mapping');
     }
 
     let user = Meteor.users.findOne({[mapping.key]: value});
@@ -171,9 +181,8 @@ Accounts.registerLoginHandler('ldap', function(request) {
         logger.debug('Updated user', JSON.stringify(user));
     }
     else {
-        user = transformUserDoc(userEntry);
+        user = ldapConfigLoader.transformUserDoc(userEntry);
         user._id = Accounts.createUser(user);
-        Accounts.setPassword(user._id, request.pass);
 
         logger.debug('Created user', JSON.stringify(user));
     }
