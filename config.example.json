@@ -1,0 +1,32 @@
+{
+  "ldap": {
+    "debug": true,
+
+    "domain": "example.com",
+    "baseDn": "dc=example,dc=com",
+    "url": "ldap://localhost:389",
+    "bindCn": "uid=admin,ou=system",
+    "bindPassword": "secret",
+
+    "user": {
+      "dn": "ou=Users,dc=example,dc=com",
+      "mappings": [
+        {
+          "attr": "mail",
+          "key": "username",
+          "unique": true
+        },
+        {
+          "attr": "mail",
+          "key": "email",
+          "unique": true
+        },
+        {
+          "attr": "givenName",
+          "key": "profile.name"
+        }
+      ]
+    }
+  }
+}
+

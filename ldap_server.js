@@ -22,13 +22,12 @@ class LdapConfigLoader {
 
     constructor() {
         const defaultSettings = {
-            userOption: {
+            user: {
                 mappings: []
             }
         };
 
         this.settings = _.defaultsDeep(Meteor.settings.ldap || {}, defaultSettings);
-        this.userOption = this.settings.userOption;
 
         // TODO: Default user doc
         const site = Meteor.settings.public.site;
@@ -44,7 +43,7 @@ class LdapConfigLoader {
     }
 
     findUniqueMapping() {
-        const target = _.find(this.userOption.mappings, function (it) {
+        const target = _.find(this.settings.user.mappings, function (it) {
             return it.unique;
         });
         return target || {attr: 'uid', key: 'uid', unique: true};
@@ -53,7 +52,7 @@ class LdapConfigLoader {
     transformUserDoc(userEntry, isNew) {
         const doc = isNew ? _.cloneDeep(this.defaultUserDoc) : {};
 
-        _.forEach(this.userOption.mappings, function (it) {
+        _.forEach(this.settings.user.mappings, function (it) {
             if (!isNew && it.unique) {
                 return;
             }
@@ -99,7 +98,7 @@ class LdapAgent {
 
         const mapping = ldapConfigLoader.findUniqueMapping();
         const opts = {
-            dn: ldapConfigLoader.userOption.dn || ldapConfigLoader.settings.baseDn,
+            dn: ldapConfigLoader.settings.user.dn || ldapConfigLoader.settings.baseDn,
             filter: `${mapping.attr}=${username}`
         };
 
