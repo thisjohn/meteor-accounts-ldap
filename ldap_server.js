@@ -35,7 +35,10 @@ class LdapConfigLoader {
         this.defaultUserDoc = {
             profile: {
                 teams: [site],
-                site
+                site,
+                firstName: "",
+                lastName: "",
+                picUrl: "",
             }
         };
     }
@@ -47,10 +50,14 @@ class LdapConfigLoader {
         return target || {attr: 'uid', key: 'uid', unique: true};
     }
 
-    transformUserDoc(userEntry) {
-        const doc = _.cloneDeep(this.defaultUserDoc);
+    transformUserDoc(userEntry, isNew) {
+        const doc = isNew ? _.cloneDeep(this.defaultUserDoc) : {};
 
         _.forEach(this.userOption.mappings, function (it) {
+            if (!isNew && it.unique) {
+                return;
+            }
+
             const value = !!it.attr ? _.get(userEntry, it.attr) : "";
             _.set(doc, it.key, value);
         });
@@ -178,10 +185,13 @@ Accounts.registerLoginHandler('ldap', function(request) {
 
     let user = Meteor.users.findOne({[mapping.key]: value});
     if (user) {
-        logger.debug('Updated user', JSON.stringify(user));
+        const doc = ldapConfigLoader.transformUserDoc(userEntry);
+        Meteor.users.update(user._id, {$set: doc});
+
+        logger.debug('Updated user doc', JSON.stringify(doc));
     }
     else {
-        user = ldapConfigLoader.transformUserDoc(userEntry);
+        user = ldapConfigLoader.transformUserDoc(userEntry, true);
         user._id = Accounts.createUser(user);
 
         logger.debug('Created user', JSON.stringify(user));
